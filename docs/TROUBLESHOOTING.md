@@ -295,3 +295,12 @@ The MCP server may be authenticating with a different tenant than your Azure Dev
    - The organization name is spelled correctly (case-sensitive)
    - The organization exists and you have access to it
    - You're using just the organization name, not the full URL (e.g., use `contoso` not `https://dev.azure.com/contoso`)
+
+## Azure DevOps Server (On-Premises)
+
+For Azure DevOps Server 2020 Update 1, 2022.x and 26H2, see the [troubleshooting section of the on-premises guide](./ON-PREMISES.md#troubleshooting). The most common issues are:
+
+- **Entra ID authentication on-premises**: `interactive`, `azcli`, `env` and `envvar` are not supported. Use `--authentication pat` or `--authentication basic`.
+- **`REST API version ... is out of range for this server`**: the version is negotiated automatically; if auto-detection is blocked, set `--server-version` (`2020`, `2022`, `2022.1`, `2022.2` or `26h2`).
+- **Certificate errors with an internal CA**: set `NODE_EXTRA_CA_CERTS` to the CA bundle instead of disabling TLS validation.
+- **`Refusing to send a Personal Access Token to untrusted destination`**: the server returned a link with a different host name (its Public URL). Add it with `--trusted-host`.

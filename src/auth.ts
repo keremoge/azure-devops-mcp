@@ -4,15 +4,60 @@
 import { AzureCliCredential, ChainedTokenCredential, DefaultAzureCredential, TokenCredential } from "@azure/identity";
 import { logger } from "./logger.js";
 import { azureDevOpsScopes, OAuthAuthenticator } from "./oauth.js";
+import { DeploymentKind, getServerContext, isTrustedServerUrl } from "./server-context.js";
 
 const patAllowedHosts = new Set(["dev.azure.com", "vssps.dev.azure.com", "almsearch.dev.azure.com"]);
+
+/** Authentication types accepted by the CLI. */
+export const AUTHENTICATION_TYPES = ["interactive", "azcli", "env", "envvar", "pat", "basic"] as const;
+
+/** Authentication types that work against Azure DevOps Server (on-premises). */
+export const ON_PREMISES_AUTHENTICATION_TYPES = ["pat", "basic"] as const;
+
+/** Authentication types whose credential is sent as an HTTP Basic header. */
+export function isBasicCredentialAuthType(type: string): boolean {
+  return type === "pat" || type === "basic";
+}
+
+/**
+ * Validates that the selected authentication type can be used with the target deployment.
+ * Azure DevOps Server does not accept Microsoft Entra ID tokens, so only PAT and Basic credentials work there.
+ */
+export function validateAuthenticationForDeployment(type: string, kind: DeploymentKind): void {
+  if (kind === "onprem" && !(ON_PREMISES_AUTHENTICATION_TYPES as readonly string[]).includes(type)) {
+    throw new Error(
+      `Authentication type '${type}' is not supported with Azure DevOps Server (on-premises). ` +
+        `Azure DevOps Server does not accept Microsoft Entra ID tokens; use '--authentication pat' (PERSONAL_ACCESS_TOKEN) ` +
+        `or '--authentication basic' (ADO_MCP_USERNAME / ADO_MCP_PASSWORD).`
+    );
+  }
+  if (kind === "cloud" && type === "basic") {
+    throw new Error("Authentication type 'basic' is only supported with Azure DevOps Server (on-premises). Use 'pat' or another authentication type for Azure DevOps Services.");
+  }
+}
 
 function isPatAllowedHost(hostname: string): boolean {
   const normalizedHostname = hostname.toLowerCase();
   return patAllowedHosts.has(normalizedHostname) || normalizedHostname.endsWith(".visualstudio.com");
 }
 
-function installPatFetchInterceptor(basicValue: string): void {
+/**
+ * Default trust policy for Basic credentials: Azure DevOps Services hosts over https, or — when connected to
+ * Azure DevOps Server — the configured collection origin (and --trusted-host entries).
+ */
+function isTrustedCredentialDestination(url: URL): boolean {
+  if (getServerContext().kind === "onprem") {
+    return isTrustedServerUrl(url);
+  }
+  return url.protocol === "https:" && isPatAllowedHost(url.hostname);
+}
+
+/**
+ * Tools send `Authorization: Bearer <credential>` with raw fetch. For PAT/Basic authentication the credential is
+ * a base64 `user:secret` pair, so this interceptor rewrites the header to `Basic <credential>` — but only for
+ * trusted destinations; any other destination is refused so credentials never leak.
+ */
+function installBasicAuthFetchInterceptor(basicValue: string, isTrusted: (url: URL) => boolean = isTrustedCredentialDestination): void {
   const originalFetch = globalThis.fetch;
   const patBearerValue = `Bearer ${basicValue}`;
 
@@ -23,7 +68,7 @@ function installPatFetchInterceptor(basicValue: string): void {
     }
 
     const requestUrl = new URL(input instanceof Request ? input.url : input.toString());
-    if (requestUrl.protocol !== "https:" || !isPatAllowedHost(requestUrl.hostname)) {
+    if (!isTrusted(requestUrl)) {
       throw new Error(`Refusing to send a Personal Access Token to untrusted destination '${requestUrl.origin}'`);
     }
 
@@ -33,6 +78,20 @@ function installPatFetchInterceptor(basicValue: string): void {
     }
     return originalFetch(input, { ...init, headers });
   };
+}
+
+function installPatFetchInterceptor(basicValue: string): void {
+  installBasicAuthFetchInterceptor(basicValue);
+}
+
+/** Splits a base64 `user:secret` credential into its parts. */
+export function decodeBasicCredential(basicValue: string): { username: string; secret: string } {
+  const decoded = Buffer.from(basicValue, "base64").toString("utf8");
+  const separator = decoded.indexOf(":");
+  if (separator < 0) {
+    return { username: "", secret: decoded };
+  }
+  return { username: decoded.slice(0, separator), secret: decoded.slice(separator + 1) };
 }
 
 function createAuthenticator(type: string, tenantId?: string): () => Promise<string> {
@@ -50,6 +109,22 @@ function createAuthenticator(type: string, tenantId?: string): () => Promise<str
         // Return base64 value as-is — caller uses it directly as the Basic auth credential
         logger.debug(`${type}: Successfully retrieved PAT from environment variable`);
         return b64Pat;
+      };
+
+    case "basic":
+      logger.debug(`Authenticator: Using Basic authentication (ADO_MCP_USERNAME / ADO_MCP_PASSWORD)`);
+      return async () => {
+        const username = process.env["ADO_MCP_USERNAME"];
+        const password = process.env["ADO_MCP_PASSWORD"];
+        if (!username || !password) {
+          logger.error(`${type}: ADO_MCP_USERNAME and/or ADO_MCP_PASSWORD environment variables are not set or empty`);
+          throw new Error("Environment variables 'ADO_MCP_USERNAME' and 'ADO_MCP_PASSWORD' must be set for Basic authentication (e.g. DOMAIN\\user and the account password).");
+        }
+        if (username.includes(":")) {
+          throw new Error("Environment variable 'ADO_MCP_USERNAME' must not contain ':'.");
+        }
+        logger.debug(`${type}: Successfully read Basic credentials from environment variables`);
+        return Buffer.from(`${username}:${password}`, "utf8").toString("base64");
       };
 
     case "envvar":
@@ -96,4 +171,4 @@ function createAuthenticator(type: string, tenantId?: string): () => Promise<str
       };
   }
 }
-export { createAuthenticator, installPatFetchInterceptor };
+export { createAuthenticator, installBasicAuthFetchInterceptor, installPatFetchInterceptor };

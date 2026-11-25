@@ -6,8 +6,8 @@ import { WebApi } from "azure-devops-node-api";
 import { IGitApi } from "azure-devops-node-api/GitApi.js";
 import { GitItem, VersionControlRecursionType } from "azure-devops-node-api/interfaces/GitInterfaces.js";
 import { z } from "zod";
-import { apiVersion } from "../utils.js";
-import { orgName } from "../index.js";
+import { getSearchBaseUrl, isOnPremises } from "../server-context.js";
+import { API_ENDPOINTS, negotiateApiVersion } from "../server-version.js";
 import { createExternalContentResponse } from "../shared/content-safety.js";
 
 const SEARCH_TOOLS = {
@@ -36,7 +36,7 @@ function configureSearchTools(server: McpServer, tokenProvider: () => Promise<st
     async ({ searchText, project, repository, path, branch, includeFacets, skip, top }) => {
       const accessToken = await tokenProvider();
       const connection = await connectionProvider();
-      const url = `https://almsearch.dev.azure.com/${orgName}/_apis/search/codesearchresults?api-version=${apiVersion}`;
+      const url = `${getSearchBaseUrl(connection.serverUrl)}/_apis/search/codesearchresults?api-version=${await negotiateApiVersion(connection, API_ENDPOINTS.codeSearch)}`;
 
       const requestBody: Record<string, unknown> = {
         searchText,
@@ -66,7 +66,7 @@ function configureSearchTools(server: McpServer, tokenProvider: () => Promise<st
       });
 
       if (!response.ok) {
-        throw new Error(`Azure DevOps Code Search API error: ${response.status} ${response.statusText}`);
+        throw new Error(searchApiErrorMessage("Code", response));
       }
 
       const resultText = await response.text();
@@ -92,7 +92,8 @@ function configureSearchTools(server: McpServer, tokenProvider: () => Promise<st
     },
     async ({ searchText, project, wiki, includeFacets, skip, top }) => {
       const accessToken = await tokenProvider();
-      const url = `https://almsearch.dev.azure.com/${orgName}/_apis/search/wikisearchresults?api-version=${apiVersion}`;
+      const connection = await connectionProvider();
+      const url = `${getSearchBaseUrl(connection.serverUrl)}/_apis/search/wikisearchresults?api-version=${await negotiateApiVersion(connection, API_ENDPOINTS.wikiSearch)}`;
 
       const requestBody: Record<string, unknown> = {
         searchText,
@@ -120,7 +121,7 @@ function configureSearchTools(server: McpServer, tokenProvider: () => Promise<st
       });
 
       if (!response.ok) {
-        throw new Error(`Azure DevOps Wiki Search API error: ${response.status} ${response.statusText}`);
+        throw new Error(searchApiErrorMessage("Wiki", response));
       }
 
       const result = (await response.json()) as WikiSearchResponse;
@@ -147,7 +148,8 @@ function configureSearchTools(server: McpServer, tokenProvider: () => Promise<st
     },
     async ({ searchText, project, areaPath, workItemType, state, assignedTo, includeFacets, skip, top }) => {
       const accessToken = await tokenProvider();
-      const url = `https://almsearch.dev.azure.com/${orgName}/_apis/search/workitemsearchresults?api-version=${apiVersion}`;
+      const connection = await connectionProvider();
+      const url = `${getSearchBaseUrl(connection.serverUrl)}/_apis/search/workitemsearchresults?api-version=${await negotiateApiVersion(connection, API_ENDPOINTS.workItemSearch)}`;
 
       const requestBody: Record<string, unknown> = {
         searchText,
@@ -178,13 +180,25 @@ function configureSearchTools(server: McpServer, tokenProvider: () => Promise<st
       });
 
       if (!response.ok) {
-        throw new Error(`Azure DevOps Work Item Search API error: ${response.status} ${response.statusText}`);
+        throw new Error(searchApiErrorMessage("Work Item", response));
       }
 
       const result = await response.text();
       return createExternalContentResponse(result, "work item search results");
     }
   );
+}
+
+/**
+ * Builds the error message for a failed search request. On Azure DevOps Server, search is provided by the
+ * Search extension, which must be installed and configured for the collection.
+ */
+function searchApiErrorMessage(kind: string, response: Response): string {
+  const base = `Azure DevOps ${kind} Search API error: ${response.status} ${response.statusText}`;
+  if (isOnPremises() && (response.status === 404 || response.status === 400)) {
+    return `${base}. On Azure DevOps Server, ${kind.toLowerCase()} search requires the Search extension to be installed and configured for this collection (Collection Settings > Extensions).`;
+  }
+  return base;
 }
 
 interface SearchResult {

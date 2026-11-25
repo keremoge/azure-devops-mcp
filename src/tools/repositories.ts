@@ -27,8 +27,9 @@ import { z } from "zod";
 import { getCurrentUserDetails, getUserIdFromEmail } from "./auth.js";
 import { GitRepository } from "azure-devops-node-api/interfaces/TfvcInterfaces.js";
 import { WebApiTagDefinition } from "azure-devops-node-api/interfaces/CoreInterfaces.js";
-import { extractAdoStreamError, getEnumKeys, streamToString, apiVersion } from "../utils.js";
-import { orgName } from "../index.js";
+import { extractAdoStreamError, getEnumKeys, streamToString } from "../utils.js";
+import { getSearchBaseUrl, isOnPremises } from "../server-context.js";
+import { API_ENDPOINTS, negotiateApiVersion } from "../server-version.js";
 import { createExternalContentResponse } from "../shared/content-safety.js";
 
 const REPO_TOOLS = {
@@ -156,7 +157,7 @@ function trimOrganizationPullRequest(pr: GitPullRequest) {
 async function getOrganizationPullRequests(connection: WebApi, identityFilter: "creatorId" | "reviewerId", identityId: string, status: number, skip: number, top: number): Promise<GitPullRequest[]> {
   const url = new URL(`${connection.serverUrl.replace(/\/$/, "")}/_apis/git/pullrequests`);
 
-  url.searchParams.set("api-version", "7.1");
+  url.searchParams.set("api-version", await negotiateApiVersion(connection, API_ENDPOINTS.orgPullRequests));
   url.searchParams.set("$skip", String(skip));
   url.searchParams.set("$top", String(top));
   url.searchParams.set(`searchCriteria.${identityFilter}`, identityId);
@@ -805,7 +806,8 @@ function configureRepoTools(server: McpServer, tokenProvider: () => Promise<stri
     },
     async ({ searchText, project, repository, branch, author, commitStartDate, commitEndDate, orderBy, includeFacets, skip, top }) => {
       const accessToken = await tokenProvider();
-      const url = `https://almsearch.dev.azure.com/${orgName}/_apis/search/commitSearchResults?api-version=${apiVersion}`;
+      const connection = await connectionProvider();
+      const url = `${getSearchBaseUrl(connection.serverUrl)}/_apis/search/commitSearchResults?api-version=${await negotiateApiVersion(connection, API_ENDPOINTS.commitSearch)}`;
 
       const requestBody: Record<string, unknown> = { searchText, includeFacets, $skip: skip, $top: top };
 
@@ -834,7 +836,11 @@ function configureRepoTools(server: McpServer, tokenProvider: () => Promise<stri
       });
 
       if (!response.ok) {
-        throw new Error(`Azure DevOps Commit Search API error: ${response.status} ${response.statusText}`);
+        const hint =
+          isOnPremises() && (response.status === 404 || response.status === 400)
+            ? ". On Azure DevOps Server, commit search requires the Search extension and may not be available on every server release."
+            : "";
+        throw new Error(`Azure DevOps Commit Search API error: ${response.status} ${response.statusText}${hint}`);
       }
 
       const result = await response.text();

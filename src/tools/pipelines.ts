@@ -2,7 +2,9 @@
 // Licensed under the MIT License.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { apiVersion, getEnumKeys, safeEnumConvert } from "../utils.js";
+import { getEnumKeys, safeEnumConvert } from "../utils.js";
+import { isTrustedServerUrl } from "../server-context.js";
+import { API_ENDPOINTS, negotiateApiVersion } from "../server-version.js";
 import { WebApi } from "azure-devops-node-api";
 import { BuildQueryOrder, DefinitionQueryOrder } from "azure-devops-node-api/interfaces/BuildInterfaces.js";
 import { z } from "zod";
@@ -23,12 +25,9 @@ import { pipelinesWriteShape, RunPipelineArgs, CreatePipelineArgs, RenamePipelin
 const errorResult = (text: string): CallToolResult => ({ content: [{ type: "text", text }], isError: true });
 const MAX_ARTIFACT_FILE_BYTES = 1024 * 1024 * 1024;
 const MAX_ARTIFACT_BASE64_BYTES = 10 * 1024 * 1024;
-const TRUSTED_ARTIFACT_HOSTS = ["dev.azure.com"];
-const TRUSTED_ARTIFACT_HOST_SUFFIXES = [".dev.azure.com", ".visualstudio.com"];
 
 function isTrustedArtifactUrl(url: URL): boolean {
-  const hostname = url.hostname.toLowerCase();
-  return url.protocol === "https:" && (TRUSTED_ARTIFACT_HOSTS.includes(hostname) || TRUSTED_ARTIFACT_HOST_SUFFIXES.some((suffix) => hostname.endsWith(suffix)));
+  return isTrustedServerUrl(url);
 }
 
 function getArtifactResponseStream(response: Response): Readable {
@@ -116,7 +115,7 @@ async function updateBuildStage(args: UpdateBuildStageArgs, connectionProvider: 
 
   const connection = await connectionProvider();
   const orgUrl = connection.serverUrl;
-  const endpoint = `${orgUrl}/${encodeURIComponent(args.project)}/_apis/build/builds/${args.buildId}/stages/${encodeURIComponent(args.stageName)}?api-version=${apiVersion}`;
+  const endpoint = `${orgUrl}/${encodeURIComponent(args.project)}/_apis/build/builds/${args.buildId}/stages/${encodeURIComponent(args.stageName)}?api-version=${await negotiateApiVersion(connection, API_ENDPOINTS.buildStages)}`;
   const token = await tokenProvider();
   const body = { forceRetryAllJobs: args.forceRetryAllJobs, state: safeEnumConvert(StageUpdateType, args.status) };
   const response = await fetch(endpoint, {

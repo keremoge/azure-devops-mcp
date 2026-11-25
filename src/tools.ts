@@ -7,6 +7,8 @@ import { WebApi } from "azure-devops-node-api";
 
 import { wrapExternalToolResponse } from "./shared/content-safety.js";
 import { Domain } from "./shared/domains.js";
+import { logger } from "./logger.js";
+import { isOnPremises } from "./server-context.js";
 import { configureToolsWithAnnotations } from "./shared/tool-annotations.js";
 import { configureAdvSecTools } from "./tools/advanced-security.js";
 import { configurePipelineTools } from "./tools/pipelines.js";
@@ -18,9 +20,19 @@ import { configureWikiTools } from "./tools/wiki.js";
 import { configureWorkTools } from "./tools/work.js";
 import { configureWorkItemTools } from "./tools/work-items.js";
 
+/** Domains whose features are not available on Azure DevOps Server (on-premises). */
+const CLOUD_ONLY_DOMAINS: ReadonlySet<string> = new Set([Domain.ADVANCED_SECURITY]);
+
 function configureAllTools(server: McpServer, tokenProvider: () => Promise<string>, connectionProvider: () => Promise<WebApi>, userAgentProvider: () => string, enabledDomains: Set<string>) {
   configureToolsWithAnnotations(server, () => {
+    const onPremises = isOnPremises();
     const configureIfDomainEnabled = (domain: string, configureFn: () => void) => {
+      if (onPremises && CLOUD_ONLY_DOMAINS.has(domain)) {
+        if (enabledDomains.has(domain)) {
+          logger.info(`Skipping '${domain}' tools: this domain is only available on Azure DevOps Services.`);
+        }
+        return;
+      }
       if (enabledDomains.has(domain)) {
         configureToolsWithContentSafety(server, domain, configureFn);
       }

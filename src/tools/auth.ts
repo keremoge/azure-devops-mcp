@@ -2,7 +2,8 @@
 // Licensed under the MIT License.
 
 import { WebApi } from "azure-devops-node-api";
-import { apiVersion } from "../utils.js";
+import { getIdentitiesBaseUrl } from "../server-context.js";
+import { API_ENDPOINTS, negotiateApiVersion } from "../server-version.js";
 import { IdentityBase } from "azure-devops-node-api/interfaces/IdentitiesInterfaces.js";
 
 interface IdentitiesResponse {
@@ -34,11 +35,10 @@ async function getCurrentUserDetails(tokenProvider: () => Promise<string>, conne
 async function searchIdentities(identity: string, tokenProvider: () => Promise<string>, connectionProvider: () => Promise<WebApi>, userAgentProvider: () => string): Promise<IdentitiesResponse> {
   const token = await tokenProvider();
   const connection = await connectionProvider();
-  const orgName = connection.serverUrl.split("/")[3];
-  const baseUrl = `https://vssps.dev.azure.com/${orgName}/_apis/identities`;
+  const baseUrl = `${getIdentitiesBaseUrl(connection.serverUrl)}/_apis/identities`;
 
   const params = new URLSearchParams({
-    "api-version": apiVersion,
+    "api-version": await negotiateApiVersion(connection, API_ENDPOINTS.identities),
     "searchFilter": "General",
     "filterValue": identity,
   });

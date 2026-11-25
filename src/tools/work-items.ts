@@ -10,7 +10,8 @@ import { IRequestHandler } from "azure-devops-node-api/interfaces/common/VsoBase
 import { WorkItemExpand, WorkItemRelation } from "azure-devops-node-api/interfaces/WorkItemTrackingInterfaces.js";
 import { QueryExpand } from "azure-devops-node-api/interfaces/WorkItemTrackingInterfaces.js";
 import { z } from "zod";
-import { batchApiVersion, markdownCommentsApiVersion, getEnumKeys, safeEnumConvert, encodeFormattedValue } from "../utils.js";
+import { batchApiVersion, getEnumKeys, safeEnumConvert, encodeFormattedValue } from "../utils.js";
+import { API_ENDPOINTS, negotiateApiVersion, supportsMarkdownComments } from "../server-version.js";
 import { elicitProject, elicitTeam } from "../shared/elicitations.js";
 import { createExternalContentResponse } from "../shared/content-safety.js";
 import { dateInputSchema } from "../shared/tool-schemas.js";
@@ -992,22 +993,27 @@ function configureWorkItemTools(server: McpServer, tokenProvider: () => Promise<
 
         const orgUrl = connection.serverUrl;
         const accessToken = await tokenProvider();
-        const formatParameter = (format ?? "Markdown") === "Markdown" ? 0 : 1;
-        const resolvedText = await prepareCommentText(text, format, tokenProvider, connectionProvider, userAgentProvider);
+        const commentsApiVersion = await negotiateApiVersion(connection, API_ENDPOINTS.workItemComments);
+        const markdownSupported = supportsMarkdownComments(commentsApiVersion);
+        const requestedFormat = format ?? "Markdown";
+        // Older Azure DevOps Server releases (e.g. 2020) only store HTML comments and do not accept the `format` parameter.
+        const effectiveFormat = markdownSupported ? requestedFormat : "Html";
+        const markdownFallback = requestedFormat === "Markdown" && !markdownSupported;
+        const formatQuery = markdownSupported ? `format=${effectiveFormat === "Markdown" ? 0 : 1}&` : "";
+        const preparedText = await prepareCommentText(text, effectiveFormat, tokenProvider, connectionProvider, userAgentProvider);
+        const resolvedText = markdownFallback ? preparedText.replace(/\r?\n/g, "<br>") : preparedText;
+        const fallbackNote = markdownFallback ? { note: `This server does not support Markdown comments (comments api-version ${commentsApiVersion}); the comment was stored as HTML.` } : {};
 
         if (action === "add") {
-          const response = await fetch(
-            `${orgUrl}/${encodeURIComponent(resolvedProject)}/_apis/wit/workItems/${workItemId}/comments?format=${formatParameter}&api-version=${markdownCommentsApiVersion}`,
-            {
-              method: "POST",
-              headers: {
-                "Authorization": `Bearer ${accessToken}`,
-                "Content-Type": "application/json",
-                "User-Agent": userAgentProvider(),
-              },
-              body: JSON.stringify({ text: resolvedText }),
-            }
-          );
+          const response = await fetch(`${orgUrl}/${encodeURIComponent(resolvedProject)}/_apis/wit/workItems/${workItemId}/comments?${formatQuery}api-version=${commentsApiVersion}`, {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${accessToken}`,
+              "Content-Type": "application/json",
+              "User-Agent": userAgentProvider(),
+            },
+            body: JSON.stringify({ text: resolvedText }),
+          });
 
           if (!response.ok) {
             throw new Error(`Failed to add a work item comment: ${response.statusText}`);
@@ -1015,25 +1021,27 @@ function configureWorkItemTools(server: McpServer, tokenProvider: () => Promise<
 
           const added = JSON.parse(await response.text());
           return {
-            content: [{ type: "text", text: JSON.stringify({ workItemId: added.workItemId, commentId: added.id, version: added.version, createdDate: added.createdDate, url: added.url }, null, 2) }],
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({ workItemId: added.workItemId, commentId: added.id, version: added.version, createdDate: added.createdDate, url: added.url, ...fallbackNote }, null, 2),
+              },
+            ],
           };
         }
 
         if (action === "update") {
           if (!commentId) return { content: [{ type: "text", text: "commentId is required for update" }], isError: true };
 
-          const response = await fetch(
-            `${orgUrl}/${encodeURIComponent(resolvedProject)}/_apis/wit/workItems/${workItemId}/comments/${commentId}?format=${formatParameter}&api-version=${markdownCommentsApiVersion}`,
-            {
-              method: "PATCH",
-              headers: {
-                "Authorization": `Bearer ${accessToken}`,
-                "Content-Type": "application/json",
-                "User-Agent": userAgentProvider(),
-              },
-              body: JSON.stringify({ text: resolvedText }),
-            }
-          );
+          const response = await fetch(`${orgUrl}/${encodeURIComponent(resolvedProject)}/_apis/wit/workItems/${workItemId}/comments/${commentId}?${formatQuery}api-version=${commentsApiVersion}`, {
+            method: "PATCH",
+            headers: {
+              "Authorization": `Bearer ${accessToken}`,
+              "Content-Type": "application/json",
+              "User-Agent": userAgentProvider(),
+            },
+            body: JSON.stringify({ text: resolvedText }),
+          });
 
           if (!response.ok) {
             throw new Error(`Failed to update work item comment: ${response.statusText}`);
@@ -1042,7 +1050,10 @@ function configureWorkItemTools(server: McpServer, tokenProvider: () => Promise<
           const updated = JSON.parse(await response.text());
           return {
             content: [
-              { type: "text", text: JSON.stringify({ workItemId: updated.workItemId, commentId: updated.id, version: updated.version, createdDate: updated.createdDate, url: updated.url }, null, 2) },
+              {
+                type: "text",
+                text: JSON.stringify({ workItemId: updated.workItemId, commentId: updated.id, version: updated.version, createdDate: updated.createdDate, url: updated.url, ...fallbackNote }, null, 2),
+              },
             ],
           };
         }
@@ -1356,12 +1367,16 @@ function configureWorkItemTools(server: McpServer, tokenProvider: () => Promise<
                 if (pageId !== undefined) {
                   const orgUrl = connection.serverUrl;
                   const accessToken = await tokenProvider();
-                  const pageResponse = await fetch(`${orgUrl}/${encodeURIComponent(resolvedProject)}/_apis/wiki/wikis/${encodeURIComponent(wikiId)}/pages/${pageId}?api-version=7.1`, {
-                    headers: {
-                      "Authorization": `Bearer ${accessToken}`,
-                      "User-Agent": userAgentProvider(),
-                    },
-                  });
+                  const wikiPageApiVersion = await negotiateApiVersion(connection, API_ENDPOINTS.wikiPageById);
+                  const pageResponse = await fetch(
+                    `${orgUrl}/${encodeURIComponent(resolvedProject)}/_apis/wiki/wikis/${encodeURIComponent(wikiId)}/pages/${pageId}?api-version=${wikiPageApiVersion}`,
+                    {
+                      headers: {
+                        "Authorization": `Bearer ${accessToken}`,
+                        "User-Agent": userAgentProvider(),
+                      },
+                    }
+                  );
                   if (!pageResponse.ok) {
                     return { content: [{ type: "text", text: `Failed to look up wiki page ID ${pageId}: ${pageResponse.statusText}` }], isError: true };
                   }

@@ -20,7 +20,7 @@ This guide explains how to run the local Azure DevOps MCP Server with supported 
 All local setups require:
 
 1. [Node.js 20 or later](https://nodejs.org/en/download).
-2. Access to an Azure DevOps organization.
+2. Access to an Azure DevOps organization, or an Azure DevOps Server collection ([on-premises setup](./ON-PREMISES.md)).
 3. An MCP client listed below.
 
 Visual Studio Code users need [VS Code](https://code.visualstudio.com/download) or [VS Code Insiders](https://code.visualstudio.com/insiders). Visual Studio users need [Visual Studio 2022 version 17.14 or later](https://learn.microsoft.com/en-us/visualstudio/releases/2022/release-history).
@@ -29,13 +29,17 @@ Visual Studio Code users need [VS Code](https://code.visualstudio.com/download) 
 
 Interactive authentication is the default. To use another method, add `--authentication <value>` or `-a <value>` to the server arguments.
 
-| Method                   | Value         | Required setup             |
-| ------------------------ | ------------- | -------------------------- |
-| Interactive (default)    | `interactive` | Microsoft account sign-in  |
-| Azure CLI                | `azcli`       | Active `az login` session  |
-| Azure credential chain   | `env`         | Azure Identity environment |
-| Bearer token environment | `envvar`      | `ADO_MCP_AUTH_TOKEN`       |
-| Personal Access Token    | `pat`         | `PERSONAL_ACCESS_TOKEN`    |
+| Method                   | Value         | Required setup                         |
+| ------------------------ | ------------- | -------------------------------------- |
+| Interactive (default)    | `interactive` | Microsoft account sign-in              |
+| Azure CLI                | `azcli`       | Active `az login` session              |
+| Azure credential chain   | `env`         | Azure Identity environment             |
+| Bearer token environment | `envvar`      | `ADO_MCP_AUTH_TOKEN`                   |
+| Personal Access Token    | `pat`         | `PERSONAL_ACCESS_TOKEN`                |
+| Basic (on-premises only) | `basic`       | `ADO_MCP_USERNAME`, `ADO_MCP_PASSWORD` |
+
+> [!NOTE]
+> Connecting to **Azure DevOps Server** (2020 Update 1, 2022.x, 26H2)? Pass the collection URL (for example `https://tfs.contoso.com/tfs/DefaultCollection`) instead of the organization name. Only `pat` (default) and `basic` work on-premises. See [Azure DevOps Server (On-Premises)](./ON-PREMISES.md).
 
 ### Interactive
 
@@ -102,6 +106,10 @@ export PERSONAL_ACCESS_TOKEN="$(printf '%s' '<email>:<pat>' | base64)"
 ```
 
 Then add `"--authentication", "pat"` to the server arguments.
+
+### Basic
+
+Use `basic` only with Azure DevOps Server when PATs are not available. Set `ADO_MCP_USERNAME` (for example `CONTOSO\jdoe`) and `ADO_MCP_PASSWORD`, then add `"--authentication", "basic"` to the server arguments. See [Azure DevOps Server (On-Premises)](./ON-PREMISES.md#basic).
 
 > [!IMPORTANT]
 > Do not commit tokens to an MCP configuration file. Set them outside the file or use a secrets manager.

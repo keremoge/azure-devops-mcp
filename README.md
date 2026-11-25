@@ -115,6 +115,16 @@ These steps use Visual Studio Code and GitHub Copilot. For other supported clien
 
 To use nightly builds, replace `@azure-devops/mcp` with `@azure-devops/mcp@next` in the configuration.
 
+### Azure DevOps Server (On-Premises)
+
+The local server also supports **Azure DevOps Server 2020 Update 1, 2022.x and 26H2 (RC)**. Pass the collection URL instead of the organization name and authenticate with a PAT or Basic credentials:
+
+```json
+"args": ["/path/to/azure-devops-mcp/dist/index.js", "https://tfs.contoso.com/tfs/DefaultCollection", "--authentication", "pat"]
+```
+
+REST API versions are negotiated with the server automatically. See the [Azure DevOps Server guide](./docs/ON-PREMISES.md) for authentication, supported features and troubleshooting.
+
 For better tool selection, add `.github/copilot-instructions.md` to your project with this instruction:
 
 ```text

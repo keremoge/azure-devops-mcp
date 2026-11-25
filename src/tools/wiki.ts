@@ -5,7 +5,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebApi } from "azure-devops-node-api";
 import { z } from "zod";
 import { WikiPagesBatchRequest } from "azure-devops-node-api/interfaces/WikiInterfaces.js";
-import { apiVersion, extractAdoStreamError, getOrgFromUrl } from "../utils.js";
+import { extractAdoStreamError } from "../utils.js";
+import { describeTarget, isSameCollection } from "../server-context.js";
+import { API_ENDPOINTS, negotiateApiVersion } from "../server-version.js";
 import { createExternalContentResponse } from "../shared/content-safety.js";
 
 const WIKI_TOOLS = {
@@ -30,7 +32,7 @@ function configureWikiTools(server: McpServer, tokenProvider: () => Promise<stri
         .string()
         .optional()
         .describe(
-          "The full URL of the wiki page. Used for get_page_content. If provided, wikiIdentifier, project, and path are ignored. Supported patterns: https://dev.azure.com/{org}/{project}/_wiki/wikis/{wikiIdentifier}?pagePath=%2FMy%20Page and https://dev.azure.com/{org}/{project}/_wiki/wikis/{wikiIdentifier}/{pageId}/Page-Title"
+          "The full URL of the wiki page. Used for get_page_content. If provided, wikiIdentifier, project, and path are ignored. Supported patterns: https://dev.azure.com/{org}/{project}/_wiki/wikis/{wikiIdentifier}?pagePath=%2FMy%20Page and https://dev.azure.com/{org}/{project}/_wiki/wikis/{wikiIdentifier}/{pageId}/Page-Title (Azure DevOps Server: {collectionUrl}/{project}/_wiki/wikis/...)"
         ),
       top: z.coerce.number().default(20).describe("Maximum number of pages to return for list_pages (up to 100; defaults to 20)."),
       continuationToken: z.string().optional().describe("Token for pagination to retrieve the next set of pages. Used for list_pages."),
@@ -120,7 +122,7 @@ function configureWikiTools(server: McpServer, tokenProvider: () => Promise<stri
           const baseUrl = connection.serverUrl.replace(/\/$/, "");
           const params = new URLSearchParams({
             "path": normalizedPath,
-            "api-version": apiVersion,
+            "api-version": await negotiateApiVersion(connection, API_ENDPOINTS.wikiPagesList),
           });
 
           if (recursionLevel) {
@@ -172,17 +174,16 @@ function configureWikiTools(server: McpServer, tokenProvider: () => Promise<stri
               return { content: [{ type: "text", text: `Error fetching wiki page content: ${parsed.error}` }], isError: true };
             }
 
-            // Guard against cross-organization requests: a user-supplied URL must target the
-            // same organization the server is connected to. Otherwise the org segment in the
-            // URL would be silently ignored and content fetched from the configured org instead.
-            const configuredOrg = getOrgFromUrl(connection.serverUrl);
-            const urlOrg = getOrgFromUrl(url);
-            if (configuredOrg && urlOrg !== configuredOrg) {
+            // Guard against cross-organization/collection requests: a user-supplied URL must target the
+            // same organization (Azure DevOps Services) or collection (Azure DevOps Server) the server is
+            // connected to. Otherwise the org segment in the URL would be silently ignored and content
+            // fetched from the configured org instead.
+            if (!isSameCollection(url, connection.serverUrl)) {
               return {
                 content: [
                   {
                     type: "text",
-                    text: `Error fetching wiki page content: The provided URL targets organization '${urlOrg ?? "unknown"}', which does not match the configured organization '${configuredOrg}'. Cross-organization requests are not allowed.`,
+                    text: `Error fetching wiki page content: The provided URL targets organization '${describeTarget(url)}', which does not match the configured organization '${describeTarget(connection.serverUrl)}'. Cross-organization requests are not allowed.`,
                   },
                 ],
                 isError: true,
@@ -200,7 +201,7 @@ function configureWikiTools(server: McpServer, tokenProvider: () => Promise<stri
               try {
                 const accessToken = await tokenProvider();
                 const baseUrl = connection.serverUrl.replace(/\/$/, "");
-                const restUrl = `${baseUrl}/${encodeURIComponent(resolvedProject)}/_apis/wiki/wikis/${encodeURIComponent(resolvedWiki)}/pages/${parsed.pageId}?includeContent=true&api-version=7.1`;
+                const restUrl = `${baseUrl}/${encodeURIComponent(resolvedProject)}/_apis/wiki/wikis/${encodeURIComponent(resolvedWiki)}/pages/${parsed.pageId}?includeContent=true&api-version=${await negotiateApiVersion(connection, API_ENDPOINTS.wikiPageById)}`;
                 const resp = await fetch(restUrl, {
                   headers: {
                     "Authorization": `Bearer ${accessToken}`,
@@ -290,7 +291,7 @@ function configureWikiTools(server: McpServer, tokenProvider: () => Promise<stri
         // Build the URL for the wiki page API with version descriptor
         const baseUrl = connection.serverUrl;
         const projectParam = project || "";
-        const url = `${baseUrl}/${encodeURIComponent(projectParam)}/_apis/wiki/wikis/${encodeURIComponent(wikiIdentifier)}/pages?path=${encodedPath}&versionDescriptor.versionType=branch&versionDescriptor.version=${encodeURIComponent(branch)}&api-version=7.1`;
+        const url = `${baseUrl}/${encodeURIComponent(projectParam)}/_apis/wiki/wikis/${encodeURIComponent(wikiIdentifier)}/pages?path=${encodedPath}&versionDescriptor.versionType=branch&versionDescriptor.version=${encodeURIComponent(branch)}&api-version=${await negotiateApiVersion(connection, API_ENDPOINTS.wikiPages)}`;
 
         // First, try to create a new page (PUT without ETag)
         const createResponse = await fetch(url, {
@@ -399,6 +400,7 @@ function streamToString(stream: NodeJS.ReadableStream): Promise<string> {
 // Supported examples:
 //  - https://dev.azure.com/org/project/_wiki/wikis/wikiIdentifier?wikiVersion=GBmain&pagePath=%2FHome
 //  - https://dev.azure.com/org/project/_wiki/wikis/wikiIdentifier/123/Title-Of-Page
+//  - https://tfs.contoso.com/tfs/DefaultCollection/project/_wiki/wikis/wikiIdentifier?pagePath=%2FHome (Azure DevOps Server)
 // Returns either a structured object OR an error message inside { error }.
 function parseWikiUrl(url: string): { project: string; wikiIdentifier: string; pagePath?: string; pageId?: number; error?: undefined } | { error: string } {
   try {
